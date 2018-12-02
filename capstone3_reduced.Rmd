@@ -1,0 +1,575 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+
+
+
+Loading Packages
+```{r, message=FALSE, warning=FALSE}
+
+
+packages = c( 'haven','Metrics','geosphere','tidyverse', 'dplyr' ,'plyr','sqldf', 'mice', 'VIM', 'missForest', 'ggplot2', 'gpairs', 'e1071', 'randomForest', 'caret', 'rpart', 'rpart.plot', 'rattle', 'caTools')
+
+for (package in packages){
+  if(!(package %in% installed.packages()[,"Package"])) {
+    install.packages(package, repos="http://cran.rstudio.com/")
+  }
+} 
+library(sqldf)
+library(dplyr)
+library(mice)
+library(missForest)
+library(VIM)
+library(ggplot2)
+library(geosphere)
+library(tidyverse)  
+library(broom)
+library(e1071)
+library(Metrics)
+library(caTools)
+library(caret)
+library(rpart)
+library(readxl)
+```
+Loading Data 
+```{r message=FALSE, warning=FALSE}
+
+ Subway<- file.choose()# Loading subway data
+ Subway <- read.csv(Subway, header=TRUE)
+ Subway <- Subway[,-1]
+ names(Subway) <- c("Date", "Time", "Day", "Station", "Code", "Min_Delay", "Min_Gap", "Bound", "Line", "Vehicle")
+```
+Clean delays of 0 mins by removing them, the imoute the NA's ising kNN.
+```{r,message=FALSE, warning=FALSE}
+
+Subway<- Subway %>%  
+  select(Date,Time,Day,Station, Code, Min_Delay,Min_Gap, Bound,Line, Vehicle) %>%
+  filter(Min_Delay != 0)
+
+
+
+#kNN imputation based on the Gower distance.
+Subway <- kNN(Subway,k = 5) 
+Subway <- Subway[, 1:10]
+
+
+```
+Most frequent delay causes for Subway.
+```{r,message=FALSE, warning=FALSE}
+Subway1 <- Subway %>%  
+  select(Date,Time,Day,Station, Code, Min_Delay,Min_Gap, Bound,Line, Vehicle) %>%
+  filter(Min_Delay != 0)  %>%  
+  count(Code)
+Subway1 <- arrange(Subway1, desc(n))
+
+head(Subway1)
+
+```
+
+Lets feature construct, Lets Split the Delay (d) into d<=5, 5<d<=10, 10<d<=15, 15<d<=20, 20<d<=25 , 25<d<=30, 30<d.
+
+```{r,message=FALSE, warning=FALSE}
+
+
+Subway2 <-mutate(Subway, 
+                 Delay_Class = ifelse(Min_Delay %in% 0:5, "Delay <= 5",
+                                          ifelse(Min_Delay %in% 6:10, "5 < Delay <= 10", 
+                                            ifelse(Min_Delay %in% 11:15, "10 < Delay <= 15", 
+                                              ifelse(Min_Delay %in% 16:20, "15 < Delay <= 20", 
+                                                ifelse(Min_Delay %in% 21:25, "20 < Delay <= 25", 
+                                                  ifelse(Min_Delay %in% 26:30, "25 < Delay <= 30", "30 < Delay"
+                                                         )))))))
+```
+Extract hours in time of day into a coloumn Hours, and change non numeric into factors 
+```{r,message=FALSE, warning=FALSE}
+
+Subway2 <-mutate(Subway2, Hours = format(strptime(Subway2$Time,"%H:%M"),'%H'))
+Subway2$Day <- as.factor(Subway2$Day)
+Subway2$Code <- as.factor(Subway2$Code)
+Subway2$Bound <- as.factor(Subway2$Bound)
+Subway2$Line <- as.factor(Subway2$Line)
+Subway2$Hours <- as.factor(Subway2$Hours)
+Subway2$Delay_Class <- as.factor(Subway2$Delay_Class)
+Subway2$Station <- as.factor(Subway2$Station)
+
+```
+Some Viliuzitaions, most Viliuzitaions will be done in excel due to ease of parting to power point.
+```{r,message=FALSE, warning=FALSE}
+Subway3 <- Subway2 %>%
+  select(everything()) %>%
+  count(Delay_Class)
+  
+id<-c(3,4,5,6,7,2,1) 
+Subway3 <- cbind(Subway3, id)
+Subway3<- arrange(Subway3, id)
+
+#need to change the factor levels so that ggplot sees them.
+Subway3$Delay_Class <- factor(Subway3$Delay_Class, levels = Subway3$Delay_Class[order(Subway3$id)]) # reorder factors
+Subway3$id <- NULL
+Subway3
+
+gg <- ggplot(Subway3, aes(x=Delay_Class, y=n)) + 
+  geom_point(col="blue", size=3) + 
+  geom_segment(aes(x=Delay_Class, 
+                   xend=Delay_Class, 
+                   y=0, 
+                   yend=n), col="blue") + 
+  labs(subtitle="Frequency vs Delay Duration", 
+       y="Frequency", 
+       x="Duration", 
+       title="Frequency of Delay Duration", 
+       caption = "Source: Jan-Aug 2018")
+
+plot(gg)
+```
+Chart of the above plot
+```{r}
+Subway3
+
+```
+
+Add mean. to plot 
+```{r,message=FALSE, warning=FALSE}
+
+#
+a1 <- aggregate(Subway2$Min_Gap, list(Delay_Type = Subway2$Code), mean)
+a1 <- rename(a1, Mean = x)
+
+a2 <- count(Subway2, Code)
+a2 <- rename(a2, Delay_Type = Code, Count = n)
+a3 <- inner_join(a1,a2, by = NULL)
+Subway_Mean <- arrange(a3, desc(Count))
+Subway_Mean
+
+```
+by  time in mins grouped by code
+```{r}
+a<- sqldf("SELECT SUM(Min_Delay), Code 
+          FROM Subway2
+          GROUP BY Code
+          ORDER BY 1 DESC
+          LIMIT 10")
+a
+```
+by  time in mins grouped by day
+```{r}
+
+b<- sqldf("SELECT SUM(Min_Delay), Day 
+          FROM Subway2
+          GROUP BY Day
+          ")
+b
+```
+Train various models (linear svm) (rf) (lm) (ensamble)
+```{r,message=FALSE, warning=FALSE}
+
+
+# Group and split the data by class, end result is a list of dataframes.
+ClassSplit = split(Subway2, Subway2$Code)
+
+#defining variables needed for loop
+fit_svm <- list(x=data.frame())
+fit_lm <- list(x=data.frame())
+fit_rf <- list(x=data.frame()) 
+ 
+predict_svm <- list(x=data.frame())
+predict_lm <- list(x=data.frame())
+predict_rf <- list(x=data.frame())
+
+sample <- list(x=data.frame())
+test_Subway <- list(x=data.frame())
+train_Subway <- list(x=data.frame())
+
+#install.packages("doParallel")
+library(doParallel)
+
+cl1 <- makePSOCKcluster(detectCores()-4)
+registerDoParallel(cl1)
+
+#registerDoSEQ()
+
+for (i in 1:length(ClassSplit)){
+  if(nrow(ClassSplit[[i]]) < 50) {NULL}
+  else {# split data by uniform sampling.
+        sample[[i]] = sample.split(ClassSplit[[i]],SplitRatio = 0.70)
+        train_Subway[[i]] =subset(ClassSplit[[i]],sample[[i]] == TRUE)
+        test_Subway[[i]]=subset(ClassSplit[[i]], sample[[i]] == FALSE)
+  
+  #fit SVM regressor and store predicted values.
+  fit_control_svm<- trainControl(method="repeatedcv", number=10, repeats = 3)
+  fit_svm[[i]]<- train(Min_Gap ~ Day + Station + Line + Bound + Hours, 
+                data = train_Subway[[i]],
+                method = "svmLinear",
+                trControl = fit_control_svm, tuneLength = 5)
+  predict_svm[[i]]<- predict(fit_svm[[i]],test_Subway[[i]]) 
+  
+  #fit RF regressor and store predicted values.     
+  fit_control_rf<- trainControl(method="repeatedcv", number=10, repeats = 3)
+  fit_rf[[i]]<- train(Min_Gap ~ Day + Station + Line + Bound + Hours, 
+                data = train_Subway[[i]],
+                method = "rf",
+                trControl = fit_control_rf, tuneLength = 5)
+  predict_rf[[i]]<- predict(fit_rf[[i]],test_Subway[[i]]) 
+  
+  #fit a linear regressor and store predicted values.
+  fit_control_lm<- trainControl(method="repeatedcv", number=10, repeats = 3)
+  fit_lm[[i]]<- train(Min_Gap ~ Day + Station + Line + Bound + Hours, 
+                data = train_Subway[[i]],
+                method = "lm",
+                trControl = fit_control_lm, tuneLength = 5)
+  predict_lm[[i]]<- predict(fit_lm[[i]],test_Subway[[i]]) 
+  
+  }
+}
+
+
+stopCluster(cl1)
+registerDoSEQ()
+
+RMSE_svm <- list(x=vector())
+RMSE_lm <- list(x=vector())
+RMSE_rf <- list(x=vector())
+MAE_svm <- list(x=vector())
+MAE_lm <- list(x=vector())
+MAE_rf <- list(x=vector())
+Code_Name<- list(x=vector())
+for (j in 1:min(length(ClassSplit),156)){
+  if (is.null(test_Subway[[j]]$Min_Gap) == TRUE) {NULL}
+  else {RMSE_svm[[j]]<-rmse(test_Subway[[j]]$Min_Gap, predict_svm[[j]])
+        RMSE_lm[[j]]<-rmse(test_Subway[[j]]$Min_Gap, predict_lm[[j]])
+        RMSE_rf[[j]]<-rmse(test_Subway[[j]]$Min_Gap, predict_rf[[j]])
+        MAE_svm[[j]]<-mae(test_Subway[[j]]$Min_Gap, predict_svm[[j]])
+        MAE_lm[[j]]<-mae(test_Subway[[j]]$Min_Gap, predict_lm[[j]])
+        MAE_rf[[j]]<-mae(test_Subway[[j]]$Min_Gap, predict_rf[[j]]) 
+        Code_Name[[j]]<- test_Subway[[j]]$Code[1] 
+     
+        } 
+}
+
+RMSE_svm_r<-as.vector(unlist(RMSE_svm))
+RMSE_lm_r<-as.vector(unlist(RMSE_lm))
+RMSE_rf_r<-as.vector(unlist(RMSE_rf))
+MAE_svm_r<-as.vector(unlist(MAE_svm))
+MAE_lm_r<-as.vector(unlist(MAE_lm))
+MAE_rf_r<-as.vector(unlist(MAE_rf))
+
+Delay_Code<-as.vector(unlist(lapply(Code_Name, as.character)))
+
+Total<-cbind.data.frame(Delay_Code,RMSE_svm_r,RMSE_lm_r,RMSE_rf_r,MAE_svm_r,
+                  MAE_lm_r,MAE_rf_r)
+
+
+
+best_r_type<-list(x=vector)
+
+#adds a coloumn to relation Total containing the best regressor type by delay code. 
+for (i in 1:nrow(Total)) { 
+                          if (Total[i,2]==min(Total[i,2],Total[i,3],Total[i,4])) {best_r_type[[i]] <- "svm"
+                                                                                  }
+                          else if (Total[i,3]==min(Total[i,2],Total[i,3],Total[i,4])) {best_r_type[[i]] <- "linear"}
+                          else {best_r_type[[i]] <- "rf"}
+                          }
+best_r_type<-unlist(best_r_type)
+
+Total1<- cbind(Total,best_r_type)
+
+
+original_index <-unlist(Code_Name) 
+Total2<- cbind(Total1, original_index)
+
+#Creates best_r (which contains the best regressor of svm, linear, rf; when measured in rmse) and indexes them the same as Total2
+best_r<-list(x=data.frame)
+for (i in 1:nrow(Total2)) { 
+                          if (Total2$best_r_type[i]=="svm") {best_r[[i]] <- fit_svm[[Total2$original_index[i]]]}
+                          else if (Total2$best_r_type[i]=="linear") {best_r[[i]] <- fit_lm[[Total2$original_index[i]]]}
+                          else {best_r[[i]] <- fit_rf[[Total2$original_index[i]]]}
+                          }
+best_r
+
+Total2
+
+## get RSME with test data we must get a new sample and test set since sampling from previous sample slpits would not make sense. We also need to compare the RSME with other models.   
+sample_full = sample.split(Subway2,SplitRatio = 0.70)
+train_Subway_full = subset(Subway2,sample_full == TRUE)
+test_Subway_full = subset(Subway2, sample_full == FALSE)
+
+
+
+cl1 <- makePSOCKcluster(detectCores()-4)
+registerDoParallel(cl1)
+
+  fit_control_svm_full<- trainControl(method="repeatedcv", number=10, repeats = 3)
+
+  fit_svm_full<- train(Min_Gap ~ Day + Station + Code + Line + Bound + Hours, 
+              data = train_Subway_full,
+              method = "svmLinear",
+              trControl = fit_control_svm_full, tuneLength = 5)
+
+  predict_svm_full<- predict(fit_svm_full,test_Subway_full) 
+
+  rmse_svm_full<-rmse(test_Subway_full$Min_Gap, predict_svm_full) #Previous Results:12.09735, 9.419213, 12.27894, 12.22133, 12.04951, 9.823341
+  mae_svm_full<-mae(test_Subway_full$Min_Gap, predict_svm_full) #Previous Results:3.460279, 3.297153, 3.355789, 3.526779, 3.527625, 3.328808
+  rmse_svm_full
+  mae_svm_full
+
+
+  # linear model
+  fit_control_lm_full<- trainControl(method="repeatedcv", number=10, repeats = 3)
+
+  fit_lm_full<- train(Min_Gap ~ Day + Station + Code + Line + Bound + Hours, 
+              data = train_Subway_full,
+              method = "lm",
+              trControl = fit_control_lm_full, tuneLength = 5)
+
+  predict_lm_full<- predict(fit_lm_full,test_Subway_full) 
+
+  rmse_lm_full<-rmse(test_Subway_full$Min_Gap, predict_lm_full)#Previous Results:11.25564, 8.638787, 11.59239, 11.27407, 11.29387, 9.028127
+  mae_lm_full<-mae(test_Subway_full$Min_Gap, predict_lm_full)#Previous Results: 4.077022, 3.913723, 3.943498, 4.211941, 4.204957, 3.953407
+  rmse_lm_full
+  mae_lm_full
+
+
+  #random forest
+
+  fit_control_rf_full<- trainControl(method="repeatedcv", number=10, repeats = 3)
+
+  fit_rf_full<- train(Min_Gap ~ Day + Station + Code + Line + Bound + Hours, 
+              data = train_Subway_full,
+              method = "rf",
+              trControl = fit_control_rf_full, tuneLength = 5)
+
+
+  predict_rf_full<- predict(fit_rf_full,test_Subway_full) 
+
+  rmse_rf_full<-rmse(test_Subway_full$Min_Gap, predict_rf_full) #Previous Results: 10.97945, 8.266417, 11.36282,  11.17688, 11.36434, 8.687817
+  mae_rf_full<-mae(test_Subway_full$Min_Gap, predict_rf_full) #Previous Results: 3.638745, 3.435454,3.77924, 3.79786, 3.840957, 3.480622
+  rmse_rf_full
+  mae_rf_full
+
+
+stopCluster(cl1)
+registerDoSEQ()
+
+
+#Our ensamble(ens) predictor
+snap <- list(x=data.frame)
+crackle <- list(x=data.frame)
+pop <-  list(x=data.frame)
+predict_ens_full <-list(x=data.frame)
+label_ens_full <- list(x=data.frame)
+for (i in 1:nrow(test_Subway_full)) {
+  if (test_Subway_full[i,5]%in%Total2$Delay_Code == TRUE){snap[[i]] <- Total2 %>% select(Delay_Code, best_r_type,original_index) %>%
+                                          filter(Delay_Code == as.vector(test_Subway_full$Code[i])) 
+      if (snap[[i]]$best_r_type == 'rf') {predict_ens_full[[i]] <- predict(fit_rf[[snap[[i]]$original_index[1]]], test_Subway_full[i,])
+                                          label_ens_full[[i]] <- "rf"} 
+      else if (snap[[i]]$best_r_type == 'linear') {predict_ens_full[[i]] <-predict(fit_lm[[snap[[i]]$original_index[1]]], test_Subway_full[i,])
+                                                    label_ens_full[[i]] <- "linear"}
+      else {predict_ens_full[[i]] <- predict(fit_svm[[snap[[i]]$original_index[1]]], test_Subway_full[i,])
+              label_ens_full[[i]] <- "svm"}
+  }
+  else  {crackle[[i]]<-Subway2 %>% select(Code,Min_Delay, Min_Gap) %>% filter(Code == as.vector(test_Subway_full$Code[i]))
+        predict_ens_full[[i]] <- predict(fit_svm_full,test_Subway_full[i,])#mean(crackle[[i]]$Min_Gap) 
+        label_ens_full[[i]] <- "svm non-conditional"} 
+}
+
+predict_ens_full<-as.vector(unlist(predict_ens_full))
+label_ens_full<-as.vector(unlist(label_ens_full))
+
+test_Subway_full <- cbind(test_Subway_full, label_ens_full)
+test_Subway_full <- cbind(test_Subway_full, predict_ens_full)
+#test_Subway_full<- na.omit(test_Subway_full) #Omit rows with NA's
+
+rmse_ens_full<-rmse(test_Subway_full$Min_Gap, predict_ens_full)  #Previous Results: 11.87939, 9.291069, 11.55512, 11.97087, 11.91217, 9.621718
+mae_ens_full<-mae(test_Subway_full$Min_Gap, predict_ens_full) #Previous Results: 3.24465, 3.126372, 3.575307, 3.438503, 3.370456, 3.160652
+
+rmse_ens_full
+mae_ens_full
+
+
+```
+
+performance measures rmse and mae of the trained models
+
+```{r}
+results_measures<-data.frame(rmse_ens_full,mae_ens_full,rmse_rf_full,mae_rf_full,rmse_lm_full,mae_lm_full,rmse_svm_full,mae_svm_full)
+results_measures
+```
+Using new data (September data that was not avaliable at the time of training), Newdata subset focuses on those 
+```{r}
+##Load the new september data.
+new_data<- read_excel("C:\\Users\\Chi\\Desktop\\Subway_&_SRT_Logs_(September_2018).xlsx", sheet = 1)
+
+names(new_data) <- c("Date", "Time", "Day", "Station", "Code", "Min_Delay", "Min_Gap", 
+                   "Bound", "Line","Vehicle")
+
+##Take only those delays longer than 0 mins.
+new_data <- new_data %>%  
+            select(Date,Time,Day,Station, Code, Min_Delay,Min_Gap, Bound,Line, Vehicle) %>%
+            filter(Min_Delay != 0)
+
+
+#impute missing values
+new_data <- kNN(new_data,k = 5) 
+new_data <- new_data[, 1:10]
+
+#take only codes and stations in the original training set; since thats all we can predict
+new_data<-new_data%>% filter(Code %in% Subway2$Code)
+new_data<-new_data%>% filter(Station %in% Subway2$Station)
+
+
+ 
+#new_data<-new_data%>% filter(Station != c("UNION TO KING STATION", "SCARBOROUGH RAPID TRAN"))
+
+#extract nessasary feadure and change to factors
+new_data <-mutate(new_data, Hours = format(strptime(new_data$Time,"%H:%M"),'%H'))
+new_data$Day <- as.factor(new_data$Day)
+new_data$Code <- as.factor(new_data$Code)
+new_data$Bound <- as.factor(new_data$Bound)
+new_data$Line <- as.factor(new_data$Line)
+new_data$Hours <- as.factor(new_data$Hours)
+new_data$Station <- as.factor(new_data$Station)
+
+new_data$Station<-factor(new_data$Station)
+
+new_data_subset<- new_data %>% select(everything()) %>% filter(Code %in% Total2$Delay_Code)
+
+
+##svm
+#Newdata
+predict_svm_new<- predict(fit_svm_full,new_data) 
+rmse_svm_new<-rmse(new_data$Min_Gap, predict_svm_new)#Previous Results:#5.51186, 5.528604, 5.477125, 5.54174, 5.524035, 5.520426 
+mae_svm_new<-mae(new_data$Min_Gap, predict_svm_new)#Previous Results:#2.672365, 2.675192, 2.639413, 2.621238, 2.612381, 2.597676
+rmse_svm_new
+mae_svm_new
+#newdata subset
+predict_svm_new_subset<- predict(fit_svm_full,new_data_subset) 
+rmse_svm_new_subset<-rmse(new_data_subset$Min_Gap, predict_svm_new_subset)#Previous Results: #4.180932, 4.173172, 4.183047, 4.32544, 4.310544, 4.283404
+mae_svm_new_subset<-mae(new_data_subset$Min_Gap, predict_svm_new_subset) #Previous Results:#2.347398, 2.353471, 2.327629, 2.392655, 2.367369, 2.379497
+rmse_svm_new_subset
+mae_svm_new_subset
+
+#lm
+#new data
+predict_lm_new<- predict(fit_lm_full,new_data) 
+rmse_lm_new<-rmse(new_data$Min_Gap, predict_lm_new)#Previous Results:# 6.19828, 6.202558, 6.080212, 6.307745, 6.234821, 6.313311 
+mae_lm_new<-mae(new_data$Min_Gap, predict_lm_new)#Previous Results:#3.425538, 3.496551, 3.303657, 3.370733, 3.352096, 3.432893
+rmse_lm_new
+mae_lm_new
+
+#newdata subset
+predict_lm_new_subset<- predict(fit_lm_full,new_data_subset) 
+rmse_lm_new_subset<-rmse(new_data_subset$Min_Gap, predict_lm_new_subset)#Previous Results: #4.438076, 4.563732, 4.457174, 4.666854, 4.632306, 4.468098
+mae_lm_new_subset<-mae(new_data_subset$Min_Gap, predict_lm_new_subset)#Previous Results: #2.923627, 2.992633, 2.833251, 2.98905, 2.96171, 2.941658 
+rmse_lm_new_subset
+mae_lm_new_subset
+
+#rf
+#newdata
+predict_rf_new<- predict(fit_rf_full,new_data) 
+rmse_rf_new<-rmse(new_data$Min_Gap, predict_rf_new)#Previous Results: #5.999946, 5.678038, 5.828507, 5.899021, 5.93217, 5.955163
+mae_rf_new<-mae(new_data$Min_Gap, predict_rf_new)#Previous Results:# 2.977484, 2.916052, 2.940546, 3.014469, 3.00836, 3.015434
+rmse_rf_new
+mae_rf_new
+
+
+#newdata subset
+predict_rf_new_subset<- predict(fit_rf_full,new_data_subset) 
+rmse_rf_new_subset<-rmse(new_data_subset$Min_Gap, predict_rf_new_subset)#Previous Results: #4.204833, 4.201916, 4.320778, 4.769885, 4.727522, 4.595684
+mae_rf_new_subset<-mae(new_data_subset$Min_Gap, predict_rf_new_subset)#Previous Results: #2.560754, 2.589518, 2.583244, 2.805282, 2.778571, 2.82674
+rmse_rf_new_subset
+mae_rf_new_subset
+
+
+#ens predictor newdata
+dub <- list(x=data.frame)
+fub <- list(x=data.frame)
+predict_ens <-list(x=data.frame)
+label_ens <- list(x=data.frame)
+for (i in 1:nrow(new_data)) {
+  if (new_data[i,5]%in%Total2$Delay_Code == TRUE){dub[[i]] <- Total2 %>% select(Delay_Code, best_r_type,original_index) %>%
+                                          filter(Delay_Code == as.vector(new_data$Code[i])) 
+      if (dub[[i]]$best_r_type == 'rf') {predict_ens[[i]] <- predict(fit_rf[[dub[[i]]$original_index[1]]], new_data[i,])
+                                          label_ens[[i]] <- "rf"} 
+      else if (dub[[i]]$best_r_type == 'linear') {predict_ens[[i]] <-predict(fit_lm[[dub[[i]]$original_index[1]]], new_data[i,])
+                                                    label_ens[[i]] <- "linear"}
+      else {predict_ens[[i]] <- predict(fit_svm[[dub[[i]]$original_index[1]]], new_data[i,])
+              label_ens[[i]] <- "svm"}
+  }
+  else  {fub[[i]]<-Subway2 %>% select(Code,Min_Delay, Min_Gap) %>% filter(Code == as.vector(new_data$Code[i]))
+        predict_ens[[i]] <- predict(fit_svm_full,new_data[i,])#mean(fub[[i]]$Min_Gap) 
+        label_ens[[i]] <- "svm non_conditional"} 
+}
+ 
+predict_ens<-as.vector(unlist(predict_ens)) 
+label_ens<-as.vector(unlist(label_ens))
+
+new_data <- cbind(new_data, label_ens)
+new_data <- cbind(new_data, predict_ens)
+new_data <- na.omit(new_data)
+
+
+rsme_ens_new<-rmse(new_data$Min_Gap, new_data$predict_ens)#Previous Results:#5.710512, 5.639216, 5.586519, 5.920717, 5.596395, 6.045352
+mae_ens_new<-mae(new_data$Min_Gap, new_data$predict_ens)#Previous Results:#2.99472, 2.913708, 2.877809, 3.023795, 2.861556, 3.076582
+rsme_ens_new
+mae_ens_new
+
+
+
+
+#ens predictor newdata_subset #### need lables for regresor type######
+dub1 <- list(x=data.frame)
+fub1 <- list(x=data.frame)
+predict_ens1 <-list(x=data.frame)
+label_ens1 <- list(x=data.frame)
+for (i in 1:nrow(new_data)) {
+  if (new_data_subset[i,5]%in%Total2$Delay_Code == TRUE){dub1[[i]] <- Total2 %>% select(Delay_Code, best_r_type,original_index) %>%
+                                          filter(Delay_Code == as.vector(new_data_subset$Code[i])) 
+      if (dub1[[i]]$best_r_type == 'rf') {predict_ens1[[i]] <- predict(fit_rf[[dub1[[i]]$original_index[1]]], new_data_subset[i,])
+                                          label_ens1[[i]] <- "rf"} 
+      else if (dub1[[i]]$best_r_type == 'linear') {predict_ens1[[i]] <-predict(fit_lm[[dub1[[i]]$original_index[1]]], new_data_subset[i,])
+                                                    label_ens1[[i]] <- "linear"}
+      else {predict_ens1[[i]] <- predict(fit_svm[[dub1[[i]]$original_index[1]]], new_data_subset[i,])
+              label_ens1[[i]] <- "svm"}
+  }
+  else {NULL}
+  #else  {fub1[[i]]<-Subway2 %>% select(Code,Min_Delay, Min_Gap) %>% filter(Code == as.vector(new_data_subset$Code[i]))
+  #      predict_ens1[[i]] <- mean(fub1[[i]]$Min_Gap) 
+   #     label_ens1[[i]] <- "mean"} 
+}
+
+predict_ens1<-as.vector(unlist(predict_ens1)) 
+label_ens1<-as.vector(unlist(label_ens1))
+
+new_data_subset <- cbind(new_data_subset, label_ens1)
+new_data_subset <- cbind(new_data_subset, predict_ens1) 
+
+
+rsme_ens_new_subset<-rmse(new_data_subset$Min_Gap, new_data_subset$predict_ens1)#Previous Results: # 4.546548, 4.379895, 4.385226, 5.081976, 4.460845, 5.319244
+mae_ens_new_subset<-mae(new_data_subset$Min_Gap, new_data_subset$predict_ens1)#Previous Results: # 2.808789, 2.694864, 2.66885, 3.05219, 2.775607, 3.16412
+rsme_ens_new_subset
+mae_ens_new_subset
+
+
+```
+Summary of measures on new september data.
+
+```{r}
+
+results_measures_sept<-data.frame(rsme_ens_new,mae_ens_new,rmse_rf_new,mae_rf_new,rmse_lm_new,mae_lm_new,rmse_svm_new,mae_svm_new)
+results_measures
+
+
+
+```
+   Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
